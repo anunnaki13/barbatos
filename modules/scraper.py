@@ -1,0 +1,175 @@
+"""Data scraper — timer, current period, draw history, bet history."""
+
+import logging
+import asyncio
+import re
+from typing import Optional
+
+import httpx
+from bs4 import BeautifulSoup
+
+from config import (
+    BASE_URL, POOL_ID, GAME_TYPE, TIMER_API_URL,
+    AJAX_HEADERS, HEADERS,
+)
+from modules.auth import AuthManager
+
+logger = logging.getLogger(__name__)
+
+
+class Scraper:
+    def __init__(self, auth: AuthManager) -> None:
+        self._auth = auth
+
+    async def _client(self) -> httpx.AsyncClient:
+        return await self._auth.get_client()
+
+    # ─── Timer ───────────────────────────────────────────────────────────────
+
+    async def get_seconds_until_close(self) -> Optional[int]:
+        """Fetch seconds remaining until draw close from external timer API."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(TIMER_API_URL)
+                data = resp.json()
+                # API returns list of pasaran objects; find OKAQ / hokidraw
+                if isinstance(data, list):
+                    for item in data:
+                        name = str(item.get("name", "") + item.get("code", "")).lower()
+                        if "hoki" in name or "okaq" in name or "p76368" in name:
+                            return int(item.get("seconds", item.get("sisa", 0)))
+                    # fallback: first item
+                    if data:
+                        return int(data[0].get("seconds", data[0].get("sisa", 0)))
+                elif isinstance(data, dict):
+                    return int(data.get("seconds", data.get("sisa", 0)))
+        except Exception as e:
+            logger.error("Timer API failed: %s", e)
+
+        # Fallback: parse game page
+        return await self._get_timer_from_game_page()
+
+    async def _get_timer_from_game_page(self) -> Optional[int]:
+        client = await self._client()
+        try:
+            resp = await client.get(
+                f"{BASE_URL}/games/4d/{POOL_ID}",
+                headers=HEADERS,
+            )
+            soup = BeautifulSoup(resp.text, "lxml")
+            timer_tag = soup.find(attrs={"name": "timerpools"}) or soup.find(id="timerpools")
+            if timer_tag:
+                return int(timer_tag.get("value", 0))
+        except Exception as e:
+            logger.error("Game page timer parse failed: %s", e)
+        return None
+
+    # ─── Current period ───────────────────────────────────────────────────────
+
+    async def get_current_periode(self) -> Optional[str]:
+        """Parse current betting periode from game page."""
+        client = await self._client()
+        try:
+            resp = await client.get(
+                f"{BASE_URL}/games/4d/{POOL_ID}",
+                headers=HEADERS,
+            )
+            soup = BeautifulSoup(resp.text, "lxml")
+            # Hidden field named 'periode'
+            tag = soup.find("input", {"name": "periode"}) or soup.find(attrs={"name": "periode"})
+            if tag:
+                return tag.get("value", "").strip()
+            # Fallback: find in text
+            match = re.search(r"periode[\"'\s:]+([A-Z0-9\-]+)", resp.text)
+            if match:
+                return match.group(1)
+        except Exception as e:
+            logger.error("Period fetch failed: %s", e)
+        return None
+
+    # ─── Draw history ─────────────────────────────────────────────────────────
+
+    async def get_draw_history(self) -> list[dict]:
+        """Fetch draw history (JSON endpoint with HTML table fallback)."""
+        results = await self._fetch_history_json()
+        if not results:
+            results = await self._fetch_history_html()
+        return results
+
+    async def _fetch_history_json(self) -> list[dict]:
+        client = await self._client()
+        try:
+            resp = await client.get(
+                f"{BASE_URL}/history/detail/data/{POOL_ID}-1",
+                headers=AJAX_HEADERS,
+            )
+            data = resp.json()
+            # Normalise varying response structures
+            rows = (
+                data if isinstance(data, list)
+                else data.get("data", data.get("results", data.get("history", [])))
+            )
+            parsed = []
+            for row in rows:
+                periode = str(row.get("periode", row.get("period", row.get("id", ""))))
+                result = str(row.get("result", row.get("keluaran", row.get("number", ""))))
+                draw_time = str(row.get("draw_time", row.get("time", row.get("tanggal", ""))))
+                if periode and result:
+                    parsed.append({"periode": periode, "result": result, "draw_time": draw_time})
+            return parsed
+        except Exception as e:
+            logger.debug("JSON history fetch failed: %s", e)
+        return []
+
+    async def _fetch_history_html(self) -> list[dict]:
+        client = await self._client()
+        try:
+            resp = await client.get(
+                f"{BASE_URL}/games/4d/history/{GAME_TYPE}/{POOL_ID}",
+                headers=HEADERS,
+            )
+            soup = BeautifulSoup(resp.text, "lxml")
+            rows = soup.select("table tr")
+            parsed = []
+            for tr in rows[1:]:  # skip header
+                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if len(cols) >= 2:
+                    parsed.append({
+                        "periode": cols[0],
+                        "result": cols[1] if len(cols) > 1 else "",
+                        "draw_time": cols[2] if len(cols) > 2 else "",
+                    })
+            return parsed
+        except Exception as e:
+            logger.debug("HTML history fetch failed: %s", e)
+        return []
+
+    # ─── Latest result ────────────────────────────────────────────────────────
+
+    async def get_latest_result(self) -> Optional[dict]:
+        """Return the most recent draw result dict {periode, result, draw_time}."""
+        history = await self.get_draw_history()
+        return history[0] if history else None
+
+    # ─── Bet history ──────────────────────────────────────────────────────────
+
+    async def get_bet_history(self) -> list[dict]:
+        """Parse bet history HTML table."""
+        client = await self._client()
+        try:
+            resp = await client.get(
+                f"{BASE_URL}/games/4d/history/{GAME_TYPE}/{POOL_ID}",
+                headers=HEADERS,
+            )
+            soup = BeautifulSoup(resp.text, "lxml")
+            tables = soup.find_all("table")
+            bets = []
+            for table in tables:
+                for tr in table.find_all("tr")[1:]:
+                    cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+                    if cols:
+                        bets.append({"raw": cols})
+            return bets
+        except Exception as e:
+            logger.error("Bet history fetch failed: %s", e)
+        return []
