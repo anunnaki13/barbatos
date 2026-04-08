@@ -1,60 +1,117 @@
+"""
+Konfigurasi bot — semua nilai dibaca dari file .env.
+Edit file .env untuk mengubah setting, jangan ubah file ini.
+"""
+
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ─── Site ────────────────────────────────────────────────────────────────────
-BASE_URL = "https://partai34848.com"
-POOL_ID = "p76368"
-GAME_TYPE = "quick_2d"
-BET_TYPE = "B"  # B=full, D=discount, A=bolak-balik
-BET_POSISI = "belakang"
 
-# ─── Credentials ─────────────────────────────────────────────────────────────
-USERNAME = os.getenv("PARTAI_USERNAME")
-PASSWORD = os.getenv("PARTAI_PASSWORD")
+def _require(key: str) -> str:
+    val = os.getenv(key, "").strip()
+    if not val:
+        _errors.append(f"  [WAJIB] {key} belum diisi di .env")
+    return val
 
-# ─── OpenRouter LLM ──────────────────────────────────────────────────────────
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-LLM_PRIMARY = "google/gemini-2.0-flash-001"
-LLM_FALLBACK = "anthropic/claude-sonnet-4-20250514"
+
+def _optional(key: str, default: str) -> str:
+    return os.getenv(key, default).strip() or default
+
+
+def _int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)).strip())
+    except ValueError:
+        _warnings.append(f"  [WARNING] {key} harus berupa angka bulat, pakai default {default}")
+        return default
+
+
+def _float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)).strip())
+    except ValueError:
+        _warnings.append(f"  [WARNING] {key} harus berupa angka desimal, pakai default {default}")
+        return default
+
+
+def _int_list(key: str, default: list[int]) -> list[int]:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        _warnings.append(
+            f"  [WARNING] {key} harus berupa angka dipisah koma (contoh: 1000,2000,4000), "
+            f"pakai default {default}"
+        )
+        return default
+
+
+_errors: list[str] = []
+_warnings: list[str] = []
+
+# ─── 1. Website ───────────────────────────────────────────────────────────────
+BASE_URL    = _optional("SITE_URL", "https://partai34848.com").rstrip("/")
+POOL_ID     = _optional("POOL_ID",  "p76368")
+GAME_TYPE   = "quick_2d"
+BET_POSISI  = "belakang"
+
+# ─── 2. Kredensial ────────────────────────────────────────────────────────────
+USERNAME = _require("PARTAI_USERNAME")
+PASSWORD = _require("PARTAI_PASSWORD")
+
+# ─── 3. OpenRouter LLM ───────────────────────────────────────────────────────
+OPENROUTER_API_KEY  = _require("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-LLM_TEMPERATURE = 0.3
-LLM_MAX_TOKENS = 1000
+LLM_PRIMARY         = _optional("LLM_MODEL",          "google/gemini-2.0-flash-001")
+LLM_FALLBACK        = _optional("LLM_FALLBACK_MODEL",  "anthropic/claude-sonnet-4-20250514")
+LLM_TEMPERATURE     = _float("LLM_TEMPERATURE", 0.3)
+LLM_MAX_TOKENS      = 1000
 
-# ─── Telegram ────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# ─── 4. Nominal bet ──────────────────────────────────────────────────────────
+BASE_BET    = _int("BASE_BET",   1_000)   # Rp/nomor di level 0
+NUM_PICKS   = _int("NUM_PICKS",  5)       # jumlah nomor per periode
+BET_TYPE    = _optional("BET_TYPE", "B") # B=full, D=diskon, A=bolak-balik
+MIN_BET     = 100
+MAX_BET_2D  = 2_000_000
 
-# ─── Betting ─────────────────────────────────────────────────────────────────
-NUM_PICKS = 5          # numbers to bet per period
-MIN_BET = 100          # Rp 100 minimum
-MAX_BET_2D = 2_000_000  # Rp 2,000,000 maximum
+# ─── 5. Martingale ───────────────────────────────────────────────────────────
+MARTINGALE_LEVELS          = _int_list(
+    "MARTINGALE_LEVELS",
+    [BASE_BET, int(BASE_BET * 1.5), int(BASE_BET * 2.5),
+     int(BASE_BET * 4),  int(BASE_BET * 6),
+     int(BASE_BET * 9),  int(BASE_BET * 13)],
+)
+MARTINGALE_LOSS_THRESHOLD  = _int("MARTINGALE_LOSS_THRESHOLD", 5)
+MAX_MARTINGALE_LEVEL       = len(MARTINGALE_LEVELS) - 1
 
-# ─── Martingale ──────────────────────────────────────────────────────────────
-# Bet amount per number at each level (IDR)
-MARTINGALE_LEVELS = [1_000, 1_500, 2_500, 4_000, 6_000, 9_000, 13_000]
-MARTINGALE_LOSS_THRESHOLD = 5   # consecutive losses before level-up
-MAX_MARTINGALE_LEVEL = len(MARTINGALE_LEVELS) - 1  # 0-indexed
+# ─── 6. Manajemen uang ───────────────────────────────────────────────────────
+DAILY_LOSS_LIMIT = _int("DAILY_LOSS_LIMIT", 200_000)
 
-# ─── Money management ────────────────────────────────────────────────────────
-DAILY_LOSS_LIMIT = 200_000  # Rp 200,000
+# ─── 7. Telegram ─────────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "").strip()
+# Telegram bersifat opsional — tidak wajib
 
-# ─── Timing ──────────────────────────────────────────────────────────────────
-POLL_INTERVAL_SECONDS = 120  # 2 minutes between polls
-BET_START_MINUTE = 5         # start placing bets from minute :05
-BET_STOP_MINUTE = 50         # stop placing bets after minute :50
-MAX_POLL_ATTEMPTS = 10       # max polling attempts for new result
+# ─── 8. Timing ───────────────────────────────────────────────────────────────
+BET_START_MINUTE      = _int("BET_START_MINUTE",    5)
+BET_STOP_MINUTE       = _int("BET_STOP_MINUTE",    50)
+POLL_INTERVAL_SECONDS = _int("POLL_INTERVAL",     120)
+MAX_POLL_ATTEMPTS     = _int("MAX_POLL_ATTEMPTS",  10)
+
+# ─── 9. Session ──────────────────────────────────────────────────────────────
+SESSION_VALIDATION_INTERVAL = _int("SESSION_CHECK_INTERVAL", 1_800)
 
 # ─── External APIs ───────────────────────────────────────────────────────────
 TIMER_API_URL = "https://jampasaran.smbgroup.io/pasaran"
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
-DB_PATH = "data/hokidraw.db"
+DB_PATH  = "data/hokidraw.db"
 LOG_PATH = "logs/bot.log"
-
-# ─── Session ─────────────────────────────────────────────────────────────────
-SESSION_VALIDATION_INTERVAL = 30 * 60  # 30 minutes in seconds
 
 # ─── Browser headers (anti-Cloudflare) ───────────────────────────────────────
 HEADERS = {
@@ -82,3 +139,86 @@ AJAX_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
 }
+
+
+# ─── Validasi konfigurasi ────────────────────────────────────────────────────
+
+def validate_config(exit_on_error: bool = True) -> bool:
+    """
+    Cek semua konfigurasi wajib dan tampilkan pesan jelas jika ada yang kurang.
+    Dipanggil otomatis saat startup.
+    """
+    ok = True
+
+    if _errors:
+        print("\n" + "=" * 60)
+        print("  KONFIGURASI BELUM LENGKAP — .env perlu diisi:")
+        print("=" * 60)
+        for e in _errors:
+            print(e)
+        print("\n  Salin .env.example ke .env lalu isi semua nilai wajib:")
+        print("  cp .env.example .env && nano .env\n")
+        ok = False
+
+    if _warnings:
+        print("\n  Peringatan konfigurasi:")
+        for w in _warnings:
+            print(w)
+        print()
+
+    # Validasi logika tambahan
+    logic_errors = []
+
+    if NUM_PICKS < 1 or NUM_PICKS > 10:
+        logic_errors.append(f"  NUM_PICKS={NUM_PICKS} harus antara 1–10")
+
+    if BASE_BET < MIN_BET:
+        logic_errors.append(
+            f"  BASE_BET=Rp{BASE_BET} di bawah minimum Rp{MIN_BET}"
+        )
+
+    if DAILY_LOSS_LIMIT < BASE_BET * NUM_PICKS:
+        logic_errors.append(
+            f"  DAILY_LOSS_LIMIT=Rp{DAILY_LOSS_LIMIT} terlalu kecil "
+            f"(kurang dari 1 round bet = Rp{BASE_BET * NUM_PICKS})"
+        )
+
+    if BET_TYPE not in ("B", "D", "A"):
+        logic_errors.append(f"  BET_TYPE='{BET_TYPE}' tidak valid. Pilih: B, D, atau A")
+
+    if not (0 <= BET_START_MINUTE <= 59):
+        logic_errors.append(f"  BET_START_MINUTE={BET_START_MINUTE} harus 0–59")
+
+    if not (0 <= BET_STOP_MINUTE <= 59):
+        logic_errors.append(f"  BET_STOP_MINUTE={BET_STOP_MINUTE} harus 0–59")
+
+    if logic_errors:
+        print("\n  Error konfigurasi:")
+        for e in logic_errors:
+            print(e)
+        print()
+        ok = False
+
+    if ok:
+        # Print summary konfigurasi aktif
+        print("\n" + "=" * 60)
+        print("  KONFIGURASI AKTIF")
+        print("=" * 60)
+        print(f"  Website      : {BASE_URL}")
+        print(f"  Pool ID      : {POOL_ID}")
+        print(f"  Username     : {USERNAME}")
+        print(f"  LLM Model    : {LLM_PRIMARY}")
+        print(f"  Bet/nomor    : Rp{BASE_BET:,}  |  {NUM_PICKS} nomor  |  Tipe: {BET_TYPE}")
+        print(f"  Total/round  : Rp{BASE_BET * NUM_PICKS:,}")
+        print(f"  Martingale   : {len(MARTINGALE_LEVELS)} level — " +
+              " → ".join(f"Rp{x:,}" for x in MARTINGALE_LEVELS))
+        print(f"  Naik level   : setiap {MARTINGALE_LOSS_THRESHOLD} kalah berturut-turut")
+        print(f"  Limit/hari   : Rp{DAILY_LOSS_LIMIT:,}")
+        print(f"  Jadwal       : setiap jam di menit :{BET_START_MINUTE:02d}")
+        print(f"  Telegram     : {'aktif' if TELEGRAM_BOT_TOKEN else 'nonaktif'}")
+        print("=" * 60 + "\n")
+
+    if not ok and exit_on_error:
+        sys.exit(1)
+
+    return ok

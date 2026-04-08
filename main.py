@@ -24,6 +24,7 @@ from config import (
     POLL_INTERVAL_SECONDS, MAX_POLL_ATTEMPTS,
     BET_START_MINUTE, BET_STOP_MINUTE,
     DAILY_LOSS_LIMIT, LOG_PATH, DB_PATH,
+    validate_config,
 )
 from modules import database as db
 from modules.auth import AuthManager
@@ -346,12 +347,23 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Log all actions without placing real bets",
+        help="Log semua aksi tanpa benar-benar pasang bet",
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Cek konfigurasi .env saja lalu keluar",
     )
     args = parser.parse_args()
 
+    # Validasi konfigurasi — wajib sebelum apapun
+    validate_config(exit_on_error=not args.check_config)
+
+    if args.check_config:
+        sys.exit(0)
+
     if args.dry_run:
-        logger.info("*** DRY RUN MODE — no real bets will be placed ***")
+        logger.info("*** DRY RUN MODE — tidak ada bet sungguhan yang dipasang ***")
 
     asyncio.run(run(dry_run=args.dry_run))
 
